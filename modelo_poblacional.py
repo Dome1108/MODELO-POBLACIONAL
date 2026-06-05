@@ -902,3 +902,869 @@ def categorizar_score(score):
         return "Score Medio"
     else:
         return "Score Alto"
+
+
+# ======================================================
+# 6. Función principal del modelo
+# ======================================================
+
+def generar_datos():
+    """
+    Función principal que ejecuta todo el modelo poblacional.
+
+    Devuelve tres tablas:
+    1. df_completo: histórico + proyección
+    2. alertas_df: alertas de caída por carrera
+    3. df_score: score de salud de carrera
+
+    Importante:
+    Esta función NO guarda archivos Excel.
+    Las tablas se devuelven directamente para usarlas en Streamlit.
+    """
+
+    # ==================================================
+    # 1. Conexión y descarga de datos
+    # ==================================================
+
+    engine = crear_engine_sql()
+
+    with engine.connect() as conn:
+        resultado = conn.execute(
+            text("SELECT @@SERVERNAME AS servidor, DB_NAME() AS base_actual")
+        )
+        for fila in resultado:
+            print("Conexión OK:", fila)
+
+    df_enrollment, df_retencion, df_carreras = descargar_datos_sql(engine)
+
+    df_ret = preparar_base_retencion(
+        df_enrollment=df_enrollment,
+        df_retencion=df_retencion,
+        df_carreras=df_carreras
+    )
+
+    # ==================================================
+    # 2. Definir estados de salida académica
+    # ==================================================
+
+    estados_muerte = ["Graduación", "Egreso", "Deserción"]
+
+    excluyentes = [
+        "CONTABILIDAD Y AUDITORÍA",
+        "INTELIGENCIA ARTIFICIAL",
+        "PSICOLOGÍA EDUCATIVA",
+        "TECNOLOGÍA SUPERIOR UNIVERSITARIA EN GASTRONOMÍA"
+    ]
+
+    # ==================================================
+    # 3. Calcular vida útil promedio por carrera
+    # ==================================================
+
+    df_ret_sorted = df_ret[df_ret["Periodo"] >= 201820].copy()
+
+    df_final = df_ret_sorted[
+        df_ret_sorted["Estado"].isin(["Graduación", "Egreso"])
+    ].copy()
+
+    vida_util_promedio = (
+        df_final
+        .groupby("CarreraHomologada")["Nivel"]
+        .mean()
+        .round(1)
+        .reset_index()
+    )
+
+    vida_util_promedio.rename(
+        columns={"Nivel": "VidaUtil_Semestres"},
+        inplace=True
+    )
+
+    vida_util_dict = {
+        carrera: round(vida_util)
+        for carrera, vida_util in vida_util_promedio
+        .set_index("CarreraHomologada")["VidaUtil_Semestres"]
+        .to_dict()
+        .items()
+    }
+
+    # ==================================================
+    # 4. Calcular tasas de deserción, graduación y retención
+    # ==================================================
+
+    df_filtrado = df_ret[df_ret["SemestreIngreso"] >= 201820].copy()
+
+    tabla_vida = (
+        df_filtrado
+        .groupby(["CarreraHomologada", "Nivel", "Cohorte", "Estado_deser"])["IDMatricula"]
+        .nunique()
+        .reset_index()
+    )
+
+    pivot = tabla_vida.pivot_table(
+        index=["CarreraHomologada", "Nivel", "Cohorte"],
+        columns="Estado_deser",
+        values="IDMatricula",
+        fill_value=0
+    ).reset_index()
+
+    for col in ["Activo", "Deserción", "Graduación", "Egreso"]:
+        if col not in pivot.columns:
+            pivot[col] = 0
+
+    pivot["Total"] = pivot[["Activo", "Graduación", "Deserción", "Egreso"]].sum(axis=1)
+
+    pivot = pivot[pivot["Total"] > 0].copy()
+
+    pivot["Tasa_Deserción"] = pivot["Deserción"] / pivot["Total"]
+    pivot["Tasa_Graduación"] = (
+        pivot["Graduación"] + pivot["Egreso"]
+    ) / pivot["Total"]
+    pivot["Tasa_Retención"] = pivot["Activo"] / pivot["Total"]
+
+    tasas_por_semestre = (
+        pivot
+        .groupby(["CarreraHomologada", "Nivel"])[
+            ["Tasa_Deserción", "Tasa_Graduación", "Tasa_Retención"]
+        ]
+        .mean()
+        .round(3)
+        .reset_index()
+    )
+
+    desv_tasas = calcular_desviaciones_tasas(df_ret)
+
+    # ==================================================
+    # 5. Calcular ingresos por ciclo y CAGR
+    # ==================================================
+
+    df_ingresos = df_ret[df_ret["EsNuevo"] == 1].copy()
+    df_ingresos["Ciclo"] = df_ingresos["SemestreIngreso"] % 100
+
+    ingresos_por_ciclo = (
+        df_ingresos
+        .groupby(["CarreraHomologada", "SemestreIngreso", "Ciclo"])["IDMatricula"]
+        .nunique()
+        .reset_index()
+    )
+
+    ingresos_por_ciclo.rename(
+        columns={"IDMatricula": "Ingresos"},
+        inplace=True
+    )
+
+    ingresos_por_ciclo = ingresos_por_ciclo[
+        ingresos_por_ciclo["SemestreIngreso"] >= 201820
+    ].copy()
+
+    ingresos_por_ciclo.sort_values(
+        by=["CarreraHomologada", "Ciclo", "SemestreIngreso"],
+        inplace=True
+    )
+
+    df_cagr_completo = calcular_cagr_todas_versiones(
+        df=ingresos_por_ciclo,
+        alpha=0.3,
+        ventana=3,
+        umbral_ingreso_inicial=5
+    )
+
+    df_cagr_completo = df_cagr_completo[[
+        "CarreraHomologada",
+        "Ciclo",
+        "CAGR_EMA"
+    ]].copy()
+
+    df_cagr_completo.rename(
+        columns={"CAGR_EMA": "Tasa_Crecimiento_Compuesta"},
+        inplace=True
+    )
+
+    cagr_dict = {
+        (row["CarreraHomologada"], row["Ciclo"]): row["Tasa_Crecimiento_Compuesta"]
+        for _, row in df_cagr_completo.dropna().iterrows()
+    }
+
+    desv_cagr_dict = calcular_desviacion_cagr(ingresos_por_ciclo)
+
+    # ==================================================
+    # 6. Crear población base en el último periodo histórico
+    # ==================================================
+
+    ultimo_periodo = ULTIMO_PERIODO
+
+    df_ultimo = df_ret[df_ret["Periodo"] == ultimo_periodo].copy()
+
+    if df_ultimo.empty:
+        periodos_disponibles = sorted(df_ret["Periodo"].dropna().unique())
+        raise ValueError(
+            f"No hay datos para ULTIMO_PERIODO={ULTIMO_PERIODO}. "
+            f"Últimos periodos disponibles: {periodos_disponibles[-10:]}"
+        )
+
+    df_vivos = df_ultimo[
+        ~df_ultimo["Estado_deser"].isin(estados_muerte)
+    ].copy()
+
+    estado_base = (
+        df_vivos
+        .groupby(["CarreraHomologada", "Nivel"])["IDMatricula"]
+        .nunique()
+        .reset_index()
+    )
+
+    estado_base.rename(
+        columns={"IDMatricula": "Cantidad"},
+        inplace=True
+    )
+
+    estado_base = estado_base[
+        ~estado_base["CarreraHomologada"].isin(excluyentes)
+    ].copy()
+
+    Poblacion = {}
+
+    for carrera, grupo in estado_base.groupby("CarreraHomologada"):
+        vida_util = int(vida_util_dict.get(carrera, grupo["Nivel"].max()))
+
+        if vida_util <= 0:
+            vida_util = 10
+
+        cohorte = [0] * vida_util
+
+        for _, row in grupo.iterrows():
+            nivel = int(row["Nivel"])
+
+            if 1 <= nivel <= vida_util:
+                cohorte[nivel - 1] = int(row["Cantidad"])
+
+        Poblacion[carrera] = cohorte
+
+    # ==================================================
+    # 7. Crear ingresos base por carrera y ciclo
+    # ==================================================
+
+    df_nuevos = df_ret[df_ret["EsNuevo"] == 1].copy()
+    df_nuevos["Ciclo"] = df_nuevos["Periodo"] % 100
+
+    ultimo_por_ciclo = (
+        df_nuevos
+        .groupby(["CarreraHomologada", "Ciclo"])["Periodo"]
+        .max()
+        .reset_index()
+    )
+
+    df_ingresos_base = df_nuevos.merge(
+        ultimo_por_ciclo,
+        on=["CarreraHomologada", "Ciclo", "Periodo"],
+        how="inner"
+    )
+
+    ingresos_base = (
+        df_ingresos_base
+        .groupby(["CarreraHomologada", "Ciclo"])["IDMatricula"]
+        .nunique()
+        .reset_index()
+    )
+
+    ingresos_base.rename(
+        columns={"IDMatricula": "Ingresos_Ultimo"},
+        inplace=True
+    )
+
+    Ingresos = {}
+
+    for _, row in ingresos_base.iterrows():
+        carrera = row["CarreraHomologada"]
+        ciclo = int(row["Ciclo"])
+        valor = int(row["Ingresos_Ultimo"])
+
+        if carrera not in Ingresos:
+            Ingresos[carrera] = {}
+
+        Ingresos[carrera][ciclo] = valor
+
+    for carrera in Poblacion.keys():
+        Ingresos.setdefault(carrera, {})
+        Ingresos[carrera].setdefault(10, 0)
+        Ingresos[carrera].setdefault(20, 0)
+
+    # ==================================================
+    # 8. Crear periodos futuros
+    # ==================================================
+
+    periodo_base = ULTIMO_PERIODO
+    anio_base = periodo_base // 100
+
+    periodos_futuros = [PRIMER_PERIODO_PROYECCION]
+
+    for i in range(1, ANIOS_PROYECCION + 1):
+        anio = anio_base + i
+        periodos_futuros.append(anio * 100 + 10)
+        periodos_futuros.append(anio * 100 + 20)
+
+    # Ejemplo:
+    # 202620, 202710, 202720, 202810, 202820, ...
+
+    # ==================================================
+    # 9. Ejecutar simulación Monte Carlo
+    # ==================================================
+
+    resultados_con_ic = simular_proyecciones_montecarlo(
+        Poblacion=Poblacion,
+        Ingresos=Ingresos,
+        cagr_dict=cagr_dict,
+        tasas_por_semestre=tasas_por_semestre,
+        desv_tasas=desv_tasas,
+        vida_util_dict=vida_util_dict,
+        periodos_futuros=periodos_futuros,
+        desv_cagr_dict=desv_cagr_dict,
+        n_simulaciones=N_SIMULACIONES
+    )
+
+    # ==================================================
+    # 10. Suavizar proyección
+    # ==================================================
+
+    variables_a_suavizar = [
+        "Total_Vivos_Prom",
+        "Nuevos_Ingresos_Prom",
+        "Total_Desertores_Prom",
+        "Total_Graduados_Prom"
+    ]
+
+    resumen_ic_suav = suavizar_proyeccion(
+        resultados_con_ic,
+        variables_a_suavizar,
+        metodo="ema",
+        alpha=0.4
+    )
+
+    resumen_ic_suav = resumen_ic_suav.drop(columns=[
+        "Total_Vivos_Prom",
+        "Nuevos_Ingresos_Prom",
+        "Total_Graduados_Prom",
+        "Total_Desertores_Prom"
+    ])
+
+    resumen_ic_suav = resumen_ic_suav.rename(columns={
+        "Total_Vivos_Prom_Suav": "Total_Vivos",
+        "Nuevos_Ingresos_Prom_Suav": "Nuevos_Ingresos",
+        "Total_Graduados_Prom_Suav": "Total_Graduados",
+        "Total_Desertores_Prom_Suav": "Total_Desertores"
+    })
+
+    resultados_con_ic = resumen_ic_suav.copy()
+
+    # ==================================================
+    # 11. Construir histórico
+    # ==================================================
+
+    periodos_historicos = df_ret[df_ret["Periodo"] >= 201820].copy()
+
+    df_hist = periodos_historicos.groupby([
+        "Periodo",
+        "CarreraHomologada"
+    ])
+
+    df_historico = df_hist.agg(
+        Nuevos_Ingresos=("EsNuevo", lambda x: (x == 1).sum()),
+        Total_Desertores=("Estado_deser", lambda x: (x == "Deserción").sum()),
+        Total_Graduados=("Estado_deser", lambda x: ((x == "Graduación") | (x == "Egreso")).sum()),
+        Total_Vivos=("Estado_deser", lambda x: (~x.isin(estados_muerte)).sum())
+    ).reset_index()
+
+    df_historico["Sobrevivientes"] = (
+        df_historico["Total_Vivos"] -
+        df_historico["Nuevos_Ingresos"]
+    )
+
+    df_historico["Ciclo"] = df_historico["Periodo"] % 100
+
+    df_historico.rename(
+        columns={"CarreraHomologada": "Carrera"},
+        inplace=True
+    )
+
+    # ==================================================
+    # 12. Unir histórico y proyección
+    # ==================================================
+
+    resultados_con_ic["Sobrevivientes"] = (
+        resultados_con_ic["Total_Vivos"] -
+        resultados_con_ic["Nuevos_Ingresos"]
+    )
+
+    resultados_con_ic["Ciclo"] = resultados_con_ic["Periodo"] % 100
+
+    carreras_proy = resultados_con_ic["Carrera"].unique()
+
+    df_historico = df_historico[
+        df_historico["Carrera"].isin(carreras_proy)
+    ].copy()
+
+    df_historico["Origen"] = "Histórico"
+    resultados_con_ic["Origen"] = "Proyección"
+
+    df_completo = pd.concat(
+        [df_historico, resultados_con_ic],
+        ignore_index=True
+    )
+
+    df_completo = df_completo.sort_values(
+        by=["Carrera", "Periodo"]
+    )
+
+    df_completo["Total_Enrollment"] = (
+        df_completo["Total_Desertores"] +
+        df_completo["Total_Graduados"] +
+        df_completo["Total_Vivos"]
+    )
+
+    # ==================================================
+    # 13. Crear alertas de caída
+    # ==================================================
+
+    periodo_hist_max = (
+        df_completo[df_completo["Origen"] == "Histórico"]
+        .groupby("Carrera")["Periodo"]
+        .max()
+        .reset_index()
+    )
+
+    periodo_proj_max = (
+        df_completo[df_completo["Origen"] == "Proyección"]
+        .groupby("Carrera")["Periodo"]
+        .max()
+        .reset_index()
+    )
+
+    enrollment_base = pd.merge(
+        periodo_hist_max,
+        df_completo,
+        on=["Carrera", "Periodo"]
+    )[["Carrera", "Total_Enrollment"]]
+
+    enrollment_base.rename(
+        columns={"Total_Enrollment": "Enrollment_Base"},
+        inplace=True
+    )
+
+    enrollment_final = pd.merge(
+        periodo_proj_max,
+        df_completo,
+        on=["Carrera", "Periodo"]
+    )[["Carrera", "Total_Enrollment"]]
+
+    enrollment_final.rename(
+        columns={"Total_Enrollment": "Enrollment_Proyectado"},
+        inplace=True
+    )
+
+    alertas_df = pd.merge(
+        enrollment_base,
+        enrollment_final,
+        on="Carrera"
+    )
+
+    alertas_df["Proporcion_Final_vs_Base"] = (
+        alertas_df["Enrollment_Proyectado"] /
+        alertas_df["Enrollment_Base"]
+    ).round(3)
+
+    alertas_df["Tipo_Alerta"] = alertas_df[
+        "Proporcion_Final_vs_Base"
+    ].apply(clasificar_alerta)
+
+    alertas_df["Incremento_Necesario"] = (
+        alertas_df["Enrollment_Base"] -
+        alertas_df["Enrollment_Proyectado"]
+    ).apply(lambda x: max(0, round(x)))
+
+    # ==================================================
+    # 14. Calcular ingresos adicionales por ciclo
+    # ==================================================
+
+    ciclos_interes = [10, 20]
+
+    df_hist_ciclos = df_completo[
+        (df_completo["Origen"] == "Histórico") &
+        (df_completo["Ciclo"].isin(ciclos_interes))
+    ].copy()
+
+    ingresos_ciclo = (
+        df_hist_ciclos
+        .groupby(["Carrera", "Ciclo"])["Nuevos_Ingresos"]
+        .sum()
+        .reset_index()
+    )
+
+    ingresos_totales = (
+        ingresos_ciclo
+        .groupby("Carrera")["Nuevos_Ingresos"]
+        .sum()
+        .reset_index()
+        .rename(columns={"Nuevos_Ingresos": "Total_Ingresos"})
+    )
+
+    proporciones = pd.merge(
+        ingresos_ciclo,
+        ingresos_totales,
+        on="Carrera"
+    )
+
+    proporciones["Proporcion_Ciclo"] = (
+        proporciones["Nuevos_Ingresos"] /
+        proporciones["Total_Ingresos"]
+    )
+
+    proporciones_pivot = (
+        proporciones
+        .pivot(index="Carrera", columns="Ciclo", values="Proporcion_Ciclo")
+        .reset_index()
+        .fillna(0)
+    )
+
+    proporciones_pivot.columns.name = None
+
+    proporciones_pivot.rename(
+        columns={
+            10: "Prop_Ciclo_10",
+            20: "Prop_Ciclo_20"
+        },
+        inplace=True
+    )
+
+    alertas_df = pd.merge(
+        alertas_df,
+        proporciones_pivot,
+        on="Carrera",
+        how="left"
+    )
+
+    alertas_df["Prop_Ciclo_10"] = alertas_df["Prop_Ciclo_10"].fillna(0)
+    alertas_df["Prop_Ciclo_20"] = alertas_df["Prop_Ciclo_20"].fillna(0)
+
+    n_periodos_futuros = len(periodos_futuros)
+
+    alertas_df["Ingresos_Adicionales_C10_Total"] = (
+        alertas_df["Incremento_Necesario"] *
+        alertas_df["Prop_Ciclo_10"]
+    ).round(1)
+
+    alertas_df["Ingresos_Adicionales_C20_Total"] = (
+        alertas_df["Incremento_Necesario"] *
+        alertas_df["Prop_Ciclo_20"]
+    ).round(1)
+
+    alertas_df["Ingresos_Adicionales_C10_xPeriodo"] = (
+        alertas_df["Ingresos_Adicionales_C10_Total"] /
+        n_periodos_futuros
+    ).round(1)
+
+    alertas_df["Ingresos_Adicionales_C20_xPeriodo"] = (
+        alertas_df["Ingresos_Adicionales_C20_Total"] /
+        n_periodos_futuros
+    ).round(1)
+
+    n_ciclos = df_completo[
+        df_completo["Origen"] == "Proyección"
+    ]["Ciclo"].nunique()
+
+    alertas_df["CAGR_Ciclo10_Necesario"] = alertas_df.apply(
+        lambda row: calcular_cagr_objetivo(
+            row["Ingresos_Adicionales_C10_Total"],
+            row["Enrollment_Proyectado"],
+            n_ciclos
+        ),
+        axis=1
+    ).round(4)
+
+    alertas_df["CAGR_Ciclo20_Necesario"] = alertas_df.apply(
+        lambda row: calcular_cagr_objetivo(
+            row["Ingresos_Adicionales_C20_Total"],
+            row["Enrollment_Proyectado"],
+            n_ciclos
+        ),
+        axis=1
+    ).round(4)
+
+    # ==================================================
+    # 15. Detectar periodos de caída
+    # ==================================================
+
+    df_hist = df_completo[
+        df_completo["Origen"] == "Histórico"
+    ].copy()
+
+    ultimo_ciclo_hist = (
+        df_hist
+        .groupby("Carrera")["Periodo"]
+        .max()
+        .reset_index()
+    )
+
+    df_base = pd.merge(
+        df_hist,
+        ultimo_ciclo_hist,
+        on=["Carrera", "Periodo"]
+    )[["Carrera", "Periodo", "Total_Enrollment", "Nuevos_Ingresos"]]
+
+    df_base.rename(
+        columns={
+            "Total_Enrollment": "Enrollment_Base",
+            "Nuevos_Ingresos": "Ingresos_Base"
+        },
+        inplace=True
+    )
+
+    df_proy = df_completo[
+        df_completo["Origen"] == "Proyección"
+    ].copy()
+
+    df_proy = df_proy[[
+        "Carrera",
+        "Periodo",
+        "Total_Enrollment",
+        "Nuevos_Ingresos"
+    ]]
+
+    df_eval = pd.merge(
+        df_proy,
+        df_base,
+        on="Carrera",
+        how="left",
+        suffixes=("", "_base")
+    )
+
+    df_eval["Prop_Enrollment"] = (
+        df_eval["Total_Enrollment"] /
+        df_eval["Enrollment_Base"]
+    )
+
+    df_eval["Prop_Ingresos"] = (
+        df_eval["Nuevos_Ingresos"] /
+        df_eval["Ingresos_Base"]
+    )
+
+    caida_75_enrollment = detectar_caida(df_eval, "Prop_Enrollment", 0.75)
+    caida_50_enrollment = detectar_caida(df_eval, "Prop_Enrollment", 0.50)
+    caida_25_enrollment = detectar_caida(df_eval, "Prop_Enrollment", 0.25)
+
+    alertas_df = alertas_df.merge(
+        caida_75_enrollment,
+        on="Carrera",
+        how="left"
+    )
+
+    alertas_df = alertas_df.merge(
+        caida_50_enrollment,
+        on="Carrera",
+        how="left"
+    )
+
+    alertas_df = alertas_df.merge(
+        caida_25_enrollment,
+        on="Carrera",
+        how="left"
+    )
+
+    # ==================================================
+    # 16. Calcular score de salud de carrera
+    # ==================================================
+
+    df_ret_filtrado = df_ret[df_ret["Periodo"] >= 201820].copy()
+
+    df_ret_filtrado["Ciclo"] = (
+        df_ret_filtrado["Periodo"]
+        .astype(str)
+        .str[-2:]
+    )
+
+    ingresos_totales_score = (
+        ingresos_por_ciclo
+        .groupby(["CarreraHomologada", "Ciclo"])["Ingresos"]
+        .sum()
+        .reset_index(name="Total_Ingresos")
+    )
+
+    ingresos_totales_score["Ciclo"] = pd.to_numeric(
+        ingresos_totales_score["Ciclo"],
+        errors="coerce"
+    )
+
+    cagr_ponderado = df_cagr_completo.merge(
+        ingresos_totales_score,
+        on=["CarreraHomologada", "Ciclo"],
+        how="inner"
+    )
+
+    cagr_ponderado_total = (
+        cagr_ponderado
+        .groupby("CarreraHomologada")
+        .apply(
+            lambda x: np.average(
+                x["Tasa_Crecimiento_Compuesta"],
+                weights=x["Total_Ingresos"]
+            )
+            if x["Total_Ingresos"].sum() > 0
+            else np.nan
+        )
+        .reset_index(name="CAGR")
+    )
+
+    retencion_por_periodo = (
+        df_ret_filtrado
+        .groupby(["CarreraHomologada", "Periodo"])["Estado_deser"]
+        .value_counts()
+        .unstack()
+        .fillna(0)
+    )
+
+    if "Activo" not in retencion_por_periodo.columns:
+        retencion_por_periodo["Activo"] = 0
+
+    retencion_por_periodo["Total"] = retencion_por_periodo.sum(axis=1)
+
+    retencion_por_periodo = retencion_por_periodo[
+        retencion_por_periodo["Total"] > 0
+    ].copy()
+
+    retencion_por_periodo["Tasa_Retencion_Periodo"] = (
+        retencion_por_periodo["Activo"] /
+        retencion_por_periodo["Total"]
+    )
+
+    retencion_promedio = (
+        retencion_por_periodo
+        .reset_index()
+        .groupby("CarreraHomologada")["Tasa_Retencion_Periodo"]
+        .mean()
+        .reset_index()
+    )
+
+    retencion_promedio.rename(
+        columns={"Tasa_Retencion_Periodo": "Tasa_Retencion"},
+        inplace=True
+    )
+
+    retencion_promedio = retencion_promedio[
+        retencion_promedio["Tasa_Retencion"] > 0.4
+    ].copy()
+
+    df_ret_filtrado_dt = df_ret[
+        df_ret["Cohorte"].between(201820, 202410)
+    ].copy()
+
+    ingresos_dt = df_ret_filtrado_dt[
+        df_ret_filtrado_dt["EsNuevo"] == 1
+    ][["IDMatricula", "CarreraHomologada", "Cohorte"]].drop_duplicates()
+
+    desertores_tempranos = df_ret_filtrado_dt[
+        (df_ret_filtrado_dt["Estado_deser"] == "Deserción") &
+        (df_ret_filtrado_dt["Nivel"].isin([1, 2]))
+    ][["IDMatricula", "CarreraHomologada", "Cohorte"]].drop_duplicates()
+
+    reingresaron = df_ret[df_ret["Nivel"] > 2]["IDMatricula"].unique()
+
+    desertores_definitivos = desertores_tempranos[
+        ~desertores_tempranos["IDMatricula"].isin(reingresaron)
+    ]
+
+    ingresos_dt["Desercion_Temprana_Real"] = ingresos_dt[
+        "IDMatricula"
+    ].isin(desertores_definitivos["IDMatricula"])
+
+    tasa_dt_real = (
+        ingresos_dt
+        .groupby(["CarreraHomologada", "Cohorte"])["Desercion_Temprana_Real"]
+        .mean()
+        .reset_index()
+    )
+
+    tasa_dt_final = (
+        tasa_dt_real
+        .groupby("CarreraHomologada")["Desercion_Temprana_Real"]
+        .mean()
+        .reset_index()
+    )
+
+    tasa_dt_final = tasa_dt_final[
+        tasa_dt_final["Desercion_Temprana_Real"] != 0
+    ].copy()
+
+    cagr_ponderado_total = cagr_ponderado_total[
+        ~cagr_ponderado_total["CarreraHomologada"].isin(excluyentes)
+    ].copy()
+
+    df_indicadores = (
+        cagr_ponderado_total
+        .merge(retencion_promedio, on="CarreraHomologada", how="outer")
+        .merge(tasa_dt_final, on="CarreraHomologada", how="outer")
+    )
+
+    df_indicadores = df_indicadores[
+        ~df_indicadores["CarreraHomologada"].isin(excluyentes)
+    ].copy()
+
+    # Normalizar indicadores
+    scaler = MinMaxScaler()
+
+    df_scaled = df_indicadores.copy()
+
+    cols_norm = [
+        "CAGR",
+        "Tasa_Retencion",
+        "Desercion_Temprana_Real"
+    ]
+
+    for col in cols_norm:
+        if col not in df_scaled.columns:
+            df_scaled[col] = np.nan
+
+    df_scaled[cols_norm] = pd.DataFrame(
+        scaler.fit_transform(df_scaled[cols_norm]),
+        columns=cols_norm,
+        index=df_scaled.index
+    )
+
+    df_scaled["Score_Salud"] = df_scaled.apply(
+        calcular_score_flexible,
+        axis=1
+    )
+
+    df_scaled["Score_Salud"] = (
+        df_scaled["Score_Salud"] * 100
+    ).round(2)
+
+    df_scaled = df_scaled[df_scaled["Score_Salud"] > 0].copy()
+
+    scaler_score = MinMaxScaler()
+
+    df_scaled["Score_Salud_Norm"] = scaler_score.fit_transform(
+        df_scaled[["Score_Salud"]]
+    )
+
+    df_scaled["Score_Salud_Final"] = (
+        df_scaled["Score_Salud_Norm"] * 100
+    ).round(2)
+
+    df_scaled["Categoria_Score"] = df_scaled[
+        "Score_Salud_Final"
+    ].apply(categorizar_score)
+
+    df_score = df_scaled.copy()
+
+    # ==================================================
+    # 17. Orden final de columnas y retorno
+    # ==================================================
+
+    df_completo = df_completo.reset_index(drop=True)
+    alertas_df = alertas_df.reset_index(drop=True)
+    df_score = df_score.reset_index(drop=True)
+
+    print("Modelo terminado correctamente.")
+    print("df_completo:", df_completo.shape)
+    print("alertas_df:", alertas_df.shape)
+    print("df_score:", df_score.shape)
+
+    return df_completo, alertas_df, df_score
