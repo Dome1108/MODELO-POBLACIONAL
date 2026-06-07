@@ -254,7 +254,6 @@ df_plot = df_filtrado[[
     "Nuevos_Ingresos",
     "Total_Desertores",
     "Total_Graduados",
-    "Total_Vivos",
     "Total_Enrollment"
 ]].copy()
 
@@ -262,7 +261,6 @@ df_plot = df_plot.rename(columns={
     "Nuevos_Ingresos": "Nuevos ingresos",
     "Total_Desertores": "Desertores",
     "Total_Graduados": "Graduados y egresados",
-    "Total_Vivos": "Estudiantes activos",
     "Total_Enrollment": "Enrollment total"
 })
 
@@ -272,7 +270,6 @@ df_long = df_plot.melt(
         "Nuevos ingresos",
         "Desertores",
         "Graduados y egresados",
-        "Estudiantes activos",
         "Enrollment total"
     ],
     var_name="Indicador",
@@ -284,7 +281,8 @@ fig_principal = px.line(
     x="Periodo",
     y="Valor",
     color="Indicador",
-    markers=True,
+    line_shape="spline",   # líneas suaves
+    markers=False,         # sin puntos
     title=f"Evolución histórica y proyectada - {carrera_seleccionada}"
 )
 
@@ -303,16 +301,35 @@ fig_principal.add_annotation(
     yshift=15
 )
 
+fig_principal.update_traces(
+    line=dict(width=3),
+    opacity=0.90
+)
+
+periodos_ticks = sorted(df_long["Periodo"].dropna().unique())
+
+fig_principal.update_xaxes(
+    tickmode="array",
+    tickvals=periodos_ticks,
+    ticktext=[str(int(p)) for p in periodos_ticks],
+    tickangle=-45
+)
+
 fig_principal.update_layout(
     height=520,
     xaxis_title="Periodo",
     yaxis_title="Cantidad de estudiantes",
     legend_title="Indicador",
-    hovermode="x unified"
+    hovermode="x unified",
+    plot_bgcolor="white",
+    paper_bgcolor="white"
+)
+
+fig_principal.update_yaxes(
+    gridcolor="rgba(0,0,0,0.10)"
 )
 
 st.plotly_chart(fig_principal, use_container_width=True)
-
 
 # ======================================================
 # 10. Gráfico de enrollment total
