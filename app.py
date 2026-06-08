@@ -24,10 +24,13 @@ st.set_page_config(
 # 2. Funciones auxiliares
 # ======================================================
 
+OPCION_TODAS = "TODAS LAS CARRERAS"
+
+
 def formatear_periodo(periodo):
     """
-    Convierte un periodo tipo 202610 en formato 2026.10.
-    Si viene como 203120.0, también lo corrige.
+    Convierte periodos tipo 202610 en 2026.10.
+    También corrige valores tipo 203120.0.
     """
     if pd.isna(periodo):
         return "No aplica"
@@ -41,7 +44,7 @@ def formatear_periodo(periodo):
 
 def formatear_numero(valor):
     """
-    Formatea números para KPIs.
+    Formatea números para tarjetas KPI.
     """
     if pd.isna(valor):
         return "0"
@@ -49,18 +52,150 @@ def formatear_numero(valor):
     return f"{float(valor):,.0f}"
 
 
+def clasificar_alerta_por_proporcion(p):
+    """
+    Clasifica alerta a partir de proporción final/base.
+    """
+    if pd.isna(p):
+        return "Sin información"
+    elif p >= 1.0:
+        return "Sin caída"
+    elif 0.75 <= p < 1.0:
+        return "Caída leve"
+    elif 0.5 < p < 0.75:
+        return "Caída moderada"
+    else:
+        return "Caída severa"
+
+
+def categorizar_score_por_valor(score):
+    """
+    Categoriza score numérico.
+    """
+    if pd.isna(score):
+        return "Sin score"
+    elif score < 33.33:
+        return "Score Bajo"
+    elif score < 66.66:
+        return "Score Medio"
+    else:
+        return "Score Alto"
+
+
 # ======================================================
-# 3. Cargar datos desde el modelo
+# 3. Funciones de colores para KPIs
+# ======================================================
+
+def color_tipo_alerta(tipo_alerta):
+    """
+    Semáforo para tipo de alerta.
+    """
+    if tipo_alerta == "Caída severa":
+        return "#C62828"  # rojo
+    elif tipo_alerta == "Caída moderada":
+        return "#EF6C00"  # naranja
+    elif tipo_alerta == "Caída leve":
+        return "#F9A825"  # amarillo
+    elif tipo_alerta == "Sin caída":
+        return "#2E7D32"  # verde
+    else:
+        return "#616161"  # gris
+
+
+def color_score(categoria_score):
+    """
+    Semáforo para score de salud.
+    """
+    if categoria_score == "Score Bajo":
+        return "#C62828"  # rojo
+    elif categoria_score == "Score Medio":
+        return "#EF6C00"  # naranja
+    elif categoria_score == "Score Alto":
+        return "#2E7D32"  # verde
+    else:
+        return "#616161"  # gris
+
+
+def color_periodo_caida(periodo):
+    """
+    Semáforo para el periodo de primera caída al 75%.
+
+    Rojo: hasta 2030.20
+    Naranja: desde 2031.10 hasta 2040.20
+    Verde: desde 2041.10 en adelante
+    """
+    if pd.isna(periodo):
+        return "#2E7D32"  # verde para No aplica
+
+    periodo = int(float(periodo))
+
+    if periodo <= 203020:
+        return "#C62828"  # rojo
+    elif 203110 <= periodo <= 204020:
+        return "#EF6C00"  # naranja
+    elif periodo >= 204110:
+        return "#2E7D32"  # verde
+    else:
+        return "#616161"  # gris
+
+
+def tarjeta_kpi(titulo, valor, color="#262730", subtitulo=None):
+    """
+    Crea una tarjeta KPI con color personalizado.
+    """
+    subtitulo_html = ""
+
+    if subtitulo is not None:
+        subtitulo_html = f"""
+        <div style="
+            font-size: 0.85rem;
+            color: #6B7280;
+            margin-top: 4px;
+        ">
+            {subtitulo}
+        </div>
+        """
+
+    st.markdown(
+        f"""
+        <div style="
+            background-color: #FFFFFF;
+            border-radius: 14px;
+            padding: 18px 20px;
+            border-left: 8px solid {color};
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            min-height: 130px;
+            margin-bottom: 12px;
+        ">
+            <div style="
+                font-size: 0.95rem;
+                color: #374151;
+                margin-bottom: 10px;
+                font-weight: 500;
+            ">
+                {titulo}
+            </div>
+            <div style="
+                font-size: 2.3rem;
+                color: {color};
+                font-weight: 700;
+                line-height: 1.1;
+            ">
+                {valor}
+            </div>
+            {subtitulo_html}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+# ======================================================
+# 4. Cargar datos desde el modelo
 # ======================================================
 
 @st.cache_data(show_spinner="Generando datos del modelo poblacional...")
 def cargar_datos():
-    """
-    Ejecuta el modelo poblacional y trae las tres tablas principales:
-    - df_completo
-    - alertas_df
-    - df_score
-    """
     df_completo, alertas_df, df_score = generar_datos()
     return df_completo, alertas_df, df_score
 
@@ -69,7 +204,7 @@ df_completo, alertas_df, df_score = cargar_datos()
 
 
 # ======================================================
-# 4. Preparar columnas
+# 5. Preparar columnas
 # ======================================================
 
 df_completo = df_completo.copy()
@@ -77,8 +212,17 @@ alertas_df = alertas_df.copy()
 df_score = df_score.copy()
 
 df_completo["Periodo"] = pd.to_numeric(df_completo["Periodo"], errors="coerce")
+df_completo = df_completo.dropna(subset=["Periodo"]).copy()
+df_completo["Periodo"] = df_completo["Periodo"].astype(int)
+
 df_completo["Periodo_Label"] = df_completo["Periodo"].apply(formatear_periodo)
 df_completo["Carrera"] = df_completo["Carrera"].astype(str)
+
+# Eje ordenado para que todos los semestres tengan la misma distancia visual.
+periodos_globales = sorted(df_completo["Periodo"].dropna().astype(int).unique())
+periodo_a_orden = {periodo: i for i, periodo in enumerate(periodos_globales)}
+
+df_completo["Periodo_Orden"] = df_completo["Periodo"].map(periodo_a_orden)
 
 alertas_df["Carrera"] = alertas_df["Carrera"].astype(str)
 
@@ -89,7 +233,7 @@ df_score["Carrera"] = df_score["Carrera"].astype(str)
 
 
 # ======================================================
-# 5. Título principal
+# 6. Título principal
 # ======================================================
 
 st.title("📊 Dashboard de Proyección Poblacional de Carreras")
@@ -103,17 +247,21 @@ st.markdown(
 
 
 # ======================================================
-# 6. Sidebar de filtros
+# 7. Sidebar de filtros
 # ======================================================
 
 st.sidebar.header("Filtros")
 
-carreras_disponibles = sorted(df_completo["Carrera"].dropna().unique())
+carreras_disponibles = [OPCION_TODAS] + sorted(
+    df_completo["Carrera"].dropna().unique()
+)
 
 carrera_seleccionada = st.sidebar.selectbox(
     "Selecciona una carrera",
     carreras_disponibles
 )
+
+es_general = carrera_seleccionada == OPCION_TODAS
 
 origenes_disponibles = sorted(df_completo["Origen"].dropna().unique())
 
@@ -123,162 +271,262 @@ origenes_seleccionados = st.sidebar.multiselect(
     default=origenes_disponibles
 )
 
-periodo_min = int(df_completo["Periodo"].min())
-periodo_max = int(df_completo["Periodo"].max())
-
-rango_periodos = st.sidebar.slider(
+rango_periodos = st.sidebar.select_slider(
     "Rango de periodos",
-    min_value=periodo_min,
-    max_value=periodo_max,
-    value=(periodo_min, periodo_max),
-    step=10,
-    format="%d"
+    options=periodos_globales,
+    value=(periodos_globales[0], periodos_globales[-1]),
+    format_func=formatear_periodo
 )
 
 
 # ======================================================
-# 7. Filtrar información
+# 8. Filtrar información
 # ======================================================
 
-df_filtrado = df_completo[
-    (df_completo["Carrera"] == carrera_seleccionada) &
+df_base_filtrada = df_completo[
     (df_completo["Origen"].isin(origenes_seleccionados)) &
     (df_completo["Periodo"] >= rango_periodos[0]) &
     (df_completo["Periodo"] <= rango_periodos[1])
 ].copy()
 
-df_filtrado = df_filtrado.sort_values("Periodo")
-
-alerta_carrera = alertas_df[
-    alertas_df["Carrera"] == carrera_seleccionada
-].copy()
-
-score_carrera = df_score[
-    df_score["Carrera"] == carrera_seleccionada
-].copy()
-
-
-# ======================================================
-# 8. KPIs superiores
-# ======================================================
-
-st.subheader(f"Carrera seleccionada: {carrera_seleccionada}")
-
-if not alerta_carrera.empty:
-    tipo_alerta = alerta_carrera["Tipo_Alerta"].iloc[0]
-    enrollment_base = alerta_carrera["Enrollment_Base"].iloc[0]
-    enrollment_proyectado = alerta_carrera["Enrollment_Proyectado"].iloc[0]
-    incremento_necesario = alerta_carrera["Incremento_Necesario"].iloc[0]
-
-    ingresos_c10 = alerta_carrera.get(
-        "Ingresos_Adicionales_C10_Total",
-        pd.Series([0])
-    ).iloc[0]
-
-    ingresos_c20 = alerta_carrera.get(
-        "Ingresos_Adicionales_C20_Total",
-        pd.Series([0])
-    ).iloc[0]
-
-    col_periodo_caida = [
-        c for c in alerta_carrera.columns
-        if "Periodo_Caida_75" in c
+if es_general:
+    columnas_sumar = [
+        "Nuevos_Ingresos",
+        "Total_Desertores",
+        "Total_Graduados",
+        "Total_Vivos",
+        "Total_Enrollment",
+        "Sobrevivientes"
     ]
 
-    if len(col_periodo_caida) > 0:
-        periodo_caida_75 = alerta_carrera[col_periodo_caida[0]].iloc[0]
-    else:
-        periodo_caida_75 = None
+    columnas_sumar = [
+        c for c in columnas_sumar
+        if c in df_base_filtrada.columns
+    ]
 
-    if pd.isna(periodo_caida_75):
+    df_filtrado = (
+        df_base_filtrada
+        .groupby(
+            ["Periodo", "Periodo_Label", "Periodo_Orden", "Origen"],
+            as_index=False
+        )[columnas_sumar]
+        .sum()
+    )
+
+    alerta_carrera = alertas_df.copy()
+    score_carrera = df_score.copy()
+
+else:
+    df_filtrado = df_base_filtrada[
+        df_base_filtrada["Carrera"] == carrera_seleccionada
+    ].copy()
+
+    alerta_carrera = alertas_df[
+        alertas_df["Carrera"] == carrera_seleccionada
+    ].copy()
+
+    score_carrera = df_score[
+        df_score["Carrera"] == carrera_seleccionada
+    ].copy()
+
+df_filtrado = df_filtrado.sort_values("Periodo")
+
+
+# ======================================================
+# 9. KPIs superiores
+# ======================================================
+
+titulo_vista = (
+    "TODAS LAS CARRERAS"
+    if es_general
+    else carrera_seleccionada
+)
+
+st.subheader(f"Vista seleccionada: {titulo_vista}")
+
+if es_general:
+    enrollment_base = alertas_df["Enrollment_Base"].sum()
+    enrollment_proyectado = alertas_df["Enrollment_Proyectado"].sum()
+    incremento_necesario = alertas_df["Incremento_Necesario"].sum()
+
+    ingresos_c10 = alertas_df.get(
+        "Ingresos_Adicionales_C10_Total",
+        pd.Series([0])
+    ).sum()
+
+    ingresos_c20 = alertas_df.get(
+        "Ingresos_Adicionales_C20_Total",
+        pd.Series([0])
+    ).sum()
+
+    if enrollment_base > 0:
+        proporcion_general = enrollment_proyectado / enrollment_base
+    else:
+        proporcion_general = None
+
+    tipo_alerta = clasificar_alerta_por_proporcion(proporcion_general)
+
+    df_eval_general = df_filtrado[
+        df_filtrado["Origen"] == "Proyección"
+    ].copy()
+
+    if not df_eval_general.empty and enrollment_base > 0:
+        df_eval_general["Prop_Enrollment"] = (
+            df_eval_general["Total_Enrollment"] / enrollment_base
+        )
+
+        periodos_caida = df_eval_general[
+            df_eval_general["Prop_Enrollment"] < 0.75
+        ]["Periodo"]
+
+        if len(periodos_caida) > 0:
+            periodo_caida_75_raw = periodos_caida.min()
+            periodo_caida_75 = formatear_periodo(periodo_caida_75_raw)
+        else:
+            periodo_caida_75_raw = None
+            periodo_caida_75 = "No aplica"
+    else:
+        periodo_caida_75_raw = None
         periodo_caida_75 = "No aplica"
+
+    if "Score_Salud_Final" in df_score.columns:
+        score_salud = df_score["Score_Salud_Final"].mean()
+        categoria_score = categorizar_score_por_valor(score_salud)
     else:
-        periodo_caida_75 = formatear_periodo(periodo_caida_75)
+        score_salud = None
+        categoria_score = "Sin score"
 
 else:
-    tipo_alerta = "Sin información"
-    enrollment_base = 0
-    enrollment_proyectado = 0
-    incremento_necesario = 0
-    ingresos_c10 = 0
-    ingresos_c20 = 0
-    periodo_caida_75 = "No aplica"
+    if not alerta_carrera.empty:
+        tipo_alerta = alerta_carrera["Tipo_Alerta"].iloc[0]
+        enrollment_base = alerta_carrera["Enrollment_Base"].iloc[0]
+        enrollment_proyectado = alerta_carrera["Enrollment_Proyectado"].iloc[0]
+        incremento_necesario = alerta_carrera["Incremento_Necesario"].iloc[0]
+
+        ingresos_c10 = alerta_carrera.get(
+            "Ingresos_Adicionales_C10_Total",
+            pd.Series([0])
+        ).iloc[0]
+
+        ingresos_c20 = alerta_carrera.get(
+            "Ingresos_Adicionales_C20_Total",
+            pd.Series([0])
+        ).iloc[0]
+
+        col_periodo_caida = [
+            c for c in alerta_carrera.columns
+            if "Periodo_Caida_75" in c
+        ]
+
+        if len(col_periodo_caida) > 0:
+            periodo_caida_75_raw = alerta_carrera[col_periodo_caida[0]].iloc[0]
+        else:
+            periodo_caida_75_raw = None
+
+        if pd.isna(periodo_caida_75_raw):
+            periodo_caida_75 = "No aplica"
+        else:
+            periodo_caida_75 = formatear_periodo(periodo_caida_75_raw)
+
+    else:
+        tipo_alerta = "Sin información"
+        enrollment_base = 0
+        enrollment_proyectado = 0
+        incremento_necesario = 0
+        ingresos_c10 = 0
+        ingresos_c20 = 0
+        periodo_caida_75_raw = None
+        periodo_caida_75 = "No aplica"
+
+    if not score_carrera.empty:
+        score_salud = score_carrera["Score_Salud_Final"].iloc[0]
+        categoria_score = score_carrera["Categoria_Score"].iloc[0]
+    else:
+        score_salud = None
+        categoria_score = "Sin score"
 
 
-if not score_carrera.empty:
-    score_salud = score_carrera["Score_Salud_Final"].iloc[0]
-    categoria_score = score_carrera["Categoria_Score"].iloc[0]
-else:
-    score_salud = None
-    categoria_score = "Sin score"
+color_alerta = color_tipo_alerta(tipo_alerta)
+color_score_salud = color_score(categoria_score)
+color_caida_75 = color_periodo_caida(periodo_caida_75_raw)
 
 
 kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
 
 with kpi1:
-    st.metric(
-        label="Tipo de alerta",
-        value=tipo_alerta
+    tarjeta_kpi(
+        titulo="Tipo de alerta",
+        valor=tipo_alerta,
+        color=color_alerta
     )
 
 with kpi2:
-    st.metric(
-        label="Enrollment base",
-        value=formatear_numero(enrollment_base)
+    tarjeta_kpi(
+        titulo="Enrollment base",
+        valor=formatear_numero(enrollment_base),
+        color="#374151"
     )
 
 with kpi3:
-    st.metric(
-        label="Enrollment proyectado",
-        value=formatear_numero(enrollment_proyectado)
+    tarjeta_kpi(
+        titulo="Enrollment proyectado",
+        valor=formatear_numero(enrollment_proyectado),
+        color="#374151"
     )
 
 with kpi4:
-    st.metric(
-        label="Incremento necesario",
-        value=formatear_numero(incremento_necesario)
+    tarjeta_kpi(
+        titulo="Incremento necesario",
+        valor=formatear_numero(incremento_necesario),
+        color=color_alerta
     )
 
 with kpi5:
     if score_salud is not None and not pd.isna(score_salud):
-        st.metric(
-            label=f"{categoria_score}",
-            value=f"{float(score_salud):,.2f}"
+        tarjeta_kpi(
+            titulo=categoria_score,
+            valor=f"{float(score_salud):,.2f}",
+            color=color_score_salud,
+            subtitulo="Score de salud"
         )
     else:
-        st.metric(
-            label="Score de salud",
-            value="Sin datos"
+        tarjeta_kpi(
+            titulo="Score de salud",
+            valor="Sin datos",
+            color="#616161"
         )
 
 
 # ======================================================
-# 9. Segunda fila de KPIs
+# 10. Segunda fila de KPIs
 # ======================================================
 
 kpi6, kpi7, kpi8 = st.columns(3)
 
 with kpi6:
-    st.metric(
-        label="Ingresos adicionales Ciclo 10",
-        value=formatear_numero(ingresos_c10)
+    tarjeta_kpi(
+        titulo="Ingresos adicionales Ciclo 10",
+        valor=formatear_numero(ingresos_c10),
+        color="#1565C0"
     )
 
 with kpi7:
-    st.metric(
-        label="Ingresos adicionales Ciclo 20",
-        value=formatear_numero(ingresos_c20)
+    tarjeta_kpi(
+        titulo="Ingresos adicionales Ciclo 20",
+        valor=formatear_numero(ingresos_c20),
+        color="#1565C0"
     )
 
 with kpi8:
-    st.metric(
-        label="Periodo primera caída 75%",
-        value=periodo_caida_75
+    tarjeta_kpi(
+        titulo="Periodo primera caída 75%",
+        valor=periodo_caida_75,
+        color=color_caida_75
     )
 
 
 # ======================================================
-# 10. Gráfico principal: histórico y proyección
+# 11. Gráfico principal: histórico y proyección
 # ======================================================
 
 st.subheader("Histórico y proyección por carrera")
@@ -286,6 +534,7 @@ st.subheader("Histórico y proyección por carrera")
 df_plot = df_filtrado[[
     "Periodo",
     "Periodo_Label",
+    "Periodo_Orden",
     "Origen",
     "Nuevos_Ingresos",
     "Total_Desertores",
@@ -303,7 +552,7 @@ df_plot = df_plot.rename(columns={
 })
 
 df_long = df_plot.melt(
-    id_vars=["Periodo", "Periodo_Label", "Origen"],
+    id_vars=["Periodo", "Periodo_Label", "Periodo_Orden", "Origen"],
     value_vars=[
         "Nuevos ingresos",
         "Desertores",
@@ -314,47 +563,59 @@ df_long = df_plot.melt(
     value_name="Valor"
 )
 
-periodos_ordenados = (
-    df_plot
-    .drop_duplicates("Periodo")
-    .sort_values("Periodo")["Periodo_Label"]
-    .tolist()
+periodos_ticks = (
+    df_plot[["Periodo", "Periodo_Label", "Periodo_Orden"]]
+    .drop_duplicates()
+    .sort_values("Periodo")
 )
 
 fig_principal = px.line(
     df_long,
-    x="Periodo_Label",
+    x="Periodo_Orden",
     y="Valor",
     color="Indicador",
     line_shape="spline",
     markers=False,
-    category_orders={"Periodo_Label": periodos_ordenados},
-    title=f"Evolución histórica y proyectada - {carrera_seleccionada}"
+    custom_data=["Periodo_Label", "Origen"],
+    title=f"Evolución histórica y proyectada - {titulo_vista}"
 )
 
-fig_principal.add_vline(
-    x=formatear_periodo(202610),
-    line_width=2,
-    line_dash="dash",
-    line_color="gray"
-)
+# Línea vertical en el primer periodo proyectado: 2026.20
+if 202620 in periodo_a_orden:
+    orden_202620 = periodo_a_orden[202620]
 
-fig_principal.add_annotation(
-    x=formatear_periodo(202620),
-    y=df_long["Valor"].max() if not df_long.empty else 0,
-    text="Inicio proyección",
-    showarrow=False,
-    yshift=15
-)
+    if not df_long.empty:
+        if df_long["Periodo_Orden"].min() <= orden_202620 <= df_long["Periodo_Orden"].max():
+            fig_principal.add_vline(
+                x=orden_202620,
+                line_width=2,
+                line_dash="dash",
+                line_color="gray"
+            )
+
+            fig_principal.add_annotation(
+                x=orden_202620,
+                y=df_long["Valor"].max(),
+                text="Inicio proyección",
+                showarrow=False,
+                yshift=15
+            )
 
 fig_principal.update_traces(
     line=dict(width=3),
-    opacity=0.90
+    opacity=0.90,
+    hovertemplate=(
+        "Periodo: %{customdata[0]}<br>"
+        "Origen: %{customdata[1]}<br>"
+        "Valor: %{y:,.0f}<extra></extra>"
+    )
 )
 
 fig_principal.update_xaxes(
-    tickangle=-45,
-    type="category"
+    tickmode="array",
+    tickvals=periodos_ticks["Periodo_Orden"],
+    ticktext=periodos_ticks["Periodo_Label"],
+    tickangle=-45
 )
 
 fig_principal.update_layout(
@@ -375,7 +636,7 @@ st.plotly_chart(fig_principal, use_container_width=True)
 
 
 # ======================================================
-# 11. Gráfico de enrollment total
+# 12. Gráfico de enrollment total
 # ======================================================
 
 col_g1, col_g2 = st.columns(2)
@@ -386,19 +647,34 @@ with col_g1:
     df_enrollment_plot = df_filtrado.copy()
     df_enrollment_plot = df_enrollment_plot.sort_values("Periodo")
 
+    periodos_ticks_bar = (
+        df_enrollment_plot[["Periodo", "Periodo_Label", "Periodo_Orden"]]
+        .drop_duplicates()
+        .sort_values("Periodo")
+    )
+
     fig_enrollment = px.bar(
         df_enrollment_plot,
-        x="Periodo_Label",
+        x="Periodo_Orden",
         y="Total_Enrollment",
         color="Origen",
-        category_orders={"Periodo_Label": periodos_ordenados},
+        custom_data=["Periodo_Label"],
         title="Enrollment histórico y proyectado",
         text_auto=True
     )
 
+    fig_enrollment.update_traces(
+        hovertemplate=(
+            "Periodo: %{customdata[0]}<br>"
+            "Enrollment total: %{y:,.0f}<extra></extra>"
+        )
+    )
+
     fig_enrollment.update_xaxes(
-        tickangle=-45,
-        type="category"
+        tickmode="array",
+        tickvals=periodos_ticks_bar["Periodo_Orden"],
+        ticktext=periodos_ticks_bar["Periodo_Label"],
+        tickangle=-45
     )
 
     fig_enrollment.update_layout(
@@ -414,7 +690,7 @@ with col_g1:
 
 
 # ======================================================
-# 12. Gráfico de composición: nuevos, desertores y graduados
+# 13. Gráfico de composición: nuevos, desertores y graduados
 # ======================================================
 
 with col_g2:
@@ -423,6 +699,7 @@ with col_g2:
     df_comp = df_filtrado[[
         "Periodo",
         "Periodo_Label",
+        "Periodo_Orden",
         "Nuevos_Ingresos",
         "Total_Desertores",
         "Total_Graduados"
@@ -437,24 +714,39 @@ with col_g2:
     })
 
     df_comp_long = df_comp.melt(
-        id_vars=["Periodo", "Periodo_Label"],
+        id_vars=["Periodo", "Periodo_Label", "Periodo_Orden"],
         var_name="Indicador",
         value_name="Valor"
     )
 
+    periodos_ticks_comp = (
+        df_comp[["Periodo", "Periodo_Label", "Periodo_Orden"]]
+        .drop_duplicates()
+        .sort_values("Periodo")
+    )
+
     fig_comp = px.bar(
         df_comp_long,
-        x="Periodo_Label",
+        x="Periodo_Orden",
         y="Valor",
         color="Indicador",
         barmode="group",
-        category_orders={"Periodo_Label": periodos_ordenados},
+        custom_data=["Periodo_Label"],
         title="Nuevos ingresos, desertores y graduados"
     )
 
+    fig_comp.update_traces(
+        hovertemplate=(
+            "Periodo: %{customdata[0]}<br>"
+            "Valor: %{y:,.0f}<extra></extra>"
+        )
+    )
+
     fig_comp.update_xaxes(
-        tickangle=-45,
-        type="category"
+        tickmode="array",
+        tickvals=periodos_ticks_comp["Periodo_Orden"],
+        ticktext=periodos_ticks_comp["Periodo_Label"],
+        tickangle=-45
     )
 
     fig_comp.update_layout(
@@ -470,7 +762,7 @@ with col_g2:
 
 
 # ======================================================
-# 13. Alertas generales por carrera
+# 14. Alertas generales por carrera
 # ======================================================
 
 st.subheader("Mapa de alertas por carrera")
@@ -499,7 +791,7 @@ st.plotly_chart(fig_alertas, use_container_width=True)
 
 
 # ======================================================
-# 14. Score de salud de carreras
+# 15. Score de salud de carreras
 # ======================================================
 
 st.subheader("Score de salud de carreras")
@@ -535,10 +827,10 @@ else:
 
 
 # ======================================================
-# 15. Tabla resumen de la carrera seleccionada
+# 16. Tabla resumen de la vista seleccionada
 # ======================================================
 
-st.subheader("Detalle de la carrera seleccionada")
+st.subheader("Detalle de la vista seleccionada")
 
 with st.expander("Ver histórico y proyección"):
     st.dataframe(
@@ -546,13 +838,13 @@ with st.expander("Ver histórico y proyección"):
         use_container_width=True
     )
 
-with st.expander("Ver alerta de la carrera"):
+with st.expander("Ver alertas"):
     st.dataframe(
         alerta_carrera,
         use_container_width=True
     )
 
-with st.expander("Ver score de la carrera"):
+with st.expander("Ver score"):
     st.dataframe(
         score_carrera,
         use_container_width=True
@@ -560,7 +852,7 @@ with st.expander("Ver score de la carrera"):
 
 
 # ======================================================
-# 16. Botón para refrescar datos
+# 17. Botón para refrescar datos
 # ======================================================
 
 st.sidebar.markdown("---")
