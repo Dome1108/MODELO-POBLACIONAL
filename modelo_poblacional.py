@@ -4,8 +4,6 @@
 # sin guardar archivos Excel.
 # ======================================================
 
-import os
-import sys
 import copy
 import urllib.parse
 from typing import Dict, List, Tuple
@@ -25,28 +23,31 @@ PRIMER_PERIODO_PROYECCION = 202620
 ANIOS_PROYECCION = 10
 N_SIMULACIONES = 200
 
+# ======================================================
+# 2. Parámetros de conexión SQL Server
+# ======================================================
+
+SERVIDOR_SQL = "SNBI03"          # Servidor 03
+BASE_DATOS_SQL = "BDD_Proyectos" # Cambia solo si en el 03 la base tiene otro nombre
+
 
 # ======================================================
-# 2. Crear conexión a SQL Server
+# 3. Crear conexión a SQL Server
 # ======================================================
 
 def crear_engine_sql():
     """
     Crea la conexión a SQL Server.
 
-    Por ahora usa los mismos datos que ya probaste:
-    servidor: SGCN05
-    base: BDD_Proyectos
-    autenticación Windows.
+    Ajuste:
+    - Antes apuntaba al servidor 05.
+    - Ahora apunta al servidor 03.
     """
-
-    servidor = "SGCN05"
-    base_datos = "BDD_Proyectos"
 
     params = urllib.parse.quote_plus(
         "DRIVER={SQL Server};"
-        f"SERVER={servidor};"
-        f"DATABASE={base_datos};"
+        f"SERVER={SERVIDOR_SQL};"
+        f"DATABASE={BASE_DATOS_SQL};"
         "Trusted_Connection=yes;"
         "TrustServerCertificate=yes;"
     )
@@ -57,7 +58,7 @@ def crear_engine_sql():
 
 
 # ======================================================
-# 3. Descargar datos desde SQL Server
+# 4. Descargar datos desde SQL Server
 # ======================================================
 
 def descargar_datos_sql(engine):
@@ -141,7 +142,7 @@ def descargar_datos_sql(engine):
 
 
 # ======================================================
-# 4. Funciones de limpieza y preparación
+# 5. Limpieza y preparación de datos
 # ======================================================
 
 def homologar_carreras_catalogo(df_carreras):
@@ -338,13 +339,11 @@ def preparar_base_retencion(df_enrollment, df_retencion, df_carreras):
         how="left"
     )
 
-    # Quitar intersemestrales.
     data = data[data["Periodo"].astype(str).str.endswith(("10", "20"))].copy()
 
     data["Periodo"] = pd.to_numeric(data["Periodo"], errors="coerce")
     data["SemestreIngreso"] = pd.to_numeric(data["SemestreIngreso"], errors="coerce")
 
-    # Tomar histórico hasta 202610.
     data = data[data["Periodo"] <= ULTIMO_PERIODO].copy()
 
     df_ret = data[[
@@ -370,7 +369,6 @@ def preparar_base_retencion(df_enrollment, df_retencion, df_carreras):
 
     df_ret = homologar_carreras_base(df_ret)
 
-    # Solo modalidad presencial.
     df_ret = df_ret[df_ret["Modalidad"] == "PRESENCIAL"].copy()
 
     df_ret["Periodo"] = pd.to_numeric(df_ret["Periodo"], errors="coerce")
@@ -408,17 +406,12 @@ def preparar_base_retencion(df_enrollment, df_retencion, df_carreras):
 
     return df_ret
 
+
 # ======================================================
-# 5. Funciones de tasas, crecimiento y simulación
+# 6. Funciones de tasas, crecimiento y simulación
 # ======================================================
 
 def calcular_desviaciones_tasas(df_ret: pd.DataFrame) -> pd.DataFrame:
-    """
-    Calcula la variabilidad histórica de las tasas de deserción y graduación.
-    Esto sirve para que Monte Carlo no use siempre una tasa fija,
-    sino una tasa con variación realista.
-    """
-
     df = df_ret.copy()
     df = df[df["SemestreIngreso"] >= 201820]
 
@@ -444,9 +437,7 @@ def calcular_desviaciones_tasas(df_ret: pd.DataFrame) -> pd.DataFrame:
     pivot = pivot[pivot["Total"] > 0].copy()
 
     pivot["Tasa_Deserción"] = pivot["Deserción"] / pivot["Total"]
-    pivot["Tasa_Graduación"] = (
-        pivot["Graduación"] + pivot["Egreso"]
-    ) / pivot["Total"]
+    pivot["Tasa_Graduación"] = (pivot["Graduación"] + pivot["Egreso"]) / pivot["Total"]
 
     resumen = (
         pivot
@@ -467,11 +458,6 @@ def calcular_desviaciones_tasas(df_ret: pd.DataFrame) -> pd.DataFrame:
 
 
 def calcular_cagr(x):
-    """
-    Calcula la tasa de crecimiento anual compuesta.
-    En este caso se usa sobre ingresos por carrera y ciclo.
-    """
-
     x = x.dropna()
 
     if len(x) < 2:
@@ -488,10 +474,6 @@ def calcular_cagr(x):
 
 
 def tasa_geom_media(x):
-    """
-    Calcula una tasa geométrica media a partir de una serie.
-    """
-
     x = x.dropna()
 
     if len(x) < 2 or (x <= 0).any():
@@ -508,11 +490,6 @@ def calcular_cagr_todas_versiones(
     ventana=3,
     umbral_ingreso_inicial=5
 ):
-    """
-    Calcula varias versiones de CAGR.
-    Para la proyección usaremos CAGR_EMA porque suaviza cambios extremos.
-    """
-
     resultados = []
 
     for (carrera, ciclo), grupo in df.groupby(["CarreraHomologada", "Ciclo"]):
@@ -564,11 +541,6 @@ def calcular_cagr_todas_versiones(
 
 
 def calcular_desviacion_cagr(df_ciclo: pd.DataFrame) -> Dict[Tuple[str, int], float]:
-    """
-    Calcula la desviación histórica de los crecimientos de ingresos.
-    Esto permite que Monte Carlo simule variaciones en los nuevos ingresos.
-    """
-
     df = df_ciclo.copy()
 
     df["SemestreIngreso"] = pd.to_numeric(df["SemestreIngreso"], errors="coerce")
@@ -605,18 +577,6 @@ def simular_proyecciones_montecarlo(
     desv_cagr_dict: Dict[Tuple[str, int], float],
     n_simulaciones: int = 1000
 ) -> pd.DataFrame:
-    """
-    Ejecuta la proyección Monte Carlo.
-
-    Para cada carrera y periodo futuro calcula:
-    - nuevos ingresos
-    - desertores
-    - graduados
-    - sobrevivientes
-    - total vivos
-
-    Al final devuelve promedios e intervalos de confianza.
-    """
 
     resultados_simulacion = []
 
@@ -653,17 +613,8 @@ def simular_proyecciones_montecarlo(
             tasas_sim["Desv_Graduacion"]
         )
 
-        tasas_sim["Tasa_Deserción_Sim"] = (
-            tasas_sim["Tasa_Deserción_Sim"]
-            .clip(0, 1)
-            .fillna(0)
-        )
-
-        tasas_sim["Tasa_Graduación_Sim"] = (
-            tasas_sim["Tasa_Graduación_Sim"]
-            .clip(0, 1)
-            .fillna(0)
-        )
+        tasas_sim["Tasa_Deserción_Sim"] = tasas_sim["Tasa_Deserción_Sim"].clip(0, 1).fillna(0)
+        tasas_sim["Tasa_Graduación_Sim"] = tasas_sim["Tasa_Graduación_Sim"].clip(0, 1).fillna(0)
 
         exceso = (
             tasas_sim["Tasa_Deserción_Sim"] +
@@ -787,9 +738,6 @@ def suavizar_proyeccion(
     alpha: float = 0.3,
     window: int = 2
 ) -> pd.DataFrame:
-    """
-    Suaviza la proyección para evitar saltos muy bruscos.
-    """
 
     df = df.copy()
     df = df.sort_values(["Carrera", "Periodo"])
@@ -810,10 +758,6 @@ def suavizar_proyeccion(
 
 
 def clasificar_alerta(p):
-    """
-    Clasifica el nivel de alerta según la caída del enrollment.
-    """
-
     if p >= 1.0:
         return "Sin caída"
     elif 0.75 <= p < 1.0:
@@ -825,10 +769,6 @@ def clasificar_alerta(p):
 
 
 def calcular_cagr_objetivo(adicional_total, base, ciclos):
-    """
-    Calcula el crecimiento necesario para compensar una caída futura.
-    """
-
     if base <= 0 or adicional_total <= 0:
         return np.nan
 
@@ -836,10 +776,6 @@ def calcular_cagr_objetivo(adicional_total, base, ciclos):
 
 
 def detectar_caida(df, columna_prop, umbral):
-    """
-    Identifica el primer periodo donde una carrera cae bajo cierto umbral.
-    """
-
     caidas = (
         df[df[columna_prop] < umbral]
         .groupby("Carrera")["Periodo"]
@@ -858,13 +794,6 @@ def detectar_caida(df, columna_prop, umbral):
 
 
 def calcular_score_flexible(row):
-    """
-    Calcula el score de salud usando:
-    - CAGR
-    - tasa de retención
-    - deserción temprana real
-    """
-
     score = 0
     peso_total = 0
 
@@ -890,10 +819,6 @@ def calcular_score_flexible(row):
 
 
 def categorizar_score(score):
-    """
-    Convierte el score numérico en categoría.
-    """
-
     if pd.isna(score):
         return np.nan
     elif score < 33.33:
@@ -905,26 +830,16 @@ def categorizar_score(score):
 
 
 # ======================================================
-# 6. Función principal del modelo
+# 7. Función principal
 # ======================================================
 
 def generar_datos():
     """
-    Función principal que ejecuta todo el modelo poblacional.
-
-    Devuelve tres tablas:
-    1. df_completo: histórico + proyección
-    2. alertas_df: alertas de caída por carrera
-    3. df_score: score de salud de carrera
-
-    Importante:
-    Esta función NO guarda archivos Excel.
-    Las tablas se devuelven directamente para usarlas en Streamlit.
+    Ejecuta todo el modelo poblacional y devuelve:
+    - df_completo
+    - alertas_df
+    - df_score
     """
-
-    # ==================================================
-    # 1. Conexión y descarga de datos
-    # ==================================================
 
     engine = crear_engine_sql()
 
@@ -943,10 +858,6 @@ def generar_datos():
         df_carreras=df_carreras
     )
 
-    # ==================================================
-    # 2. Definir estados de salida académica
-    # ==================================================
-
     estados_muerte = ["Graduación", "Egreso", "Deserción"]
 
     excluyentes = [
@@ -955,10 +866,6 @@ def generar_datos():
         "PSICOLOGÍA EDUCATIVA",
         "TECNOLOGÍA SUPERIOR UNIVERSITARIA EN GASTRONOMÍA"
     ]
-
-    # ==================================================
-    # 3. Calcular vida útil promedio por carrera
-    # ==================================================
 
     df_ret_sorted = df_ret[df_ret["Periodo"] >= 201820].copy()
 
@@ -987,10 +894,6 @@ def generar_datos():
         .items()
     }
 
-    # ==================================================
-    # 4. Calcular tasas de deserción, graduación y retención
-    # ==================================================
-
     df_filtrado = df_ret[df_ret["SemestreIngreso"] >= 201820].copy()
 
     tabla_vida = (
@@ -1012,13 +915,10 @@ def generar_datos():
             pivot[col] = 0
 
     pivot["Total"] = pivot[["Activo", "Graduación", "Deserción", "Egreso"]].sum(axis=1)
-
     pivot = pivot[pivot["Total"] > 0].copy()
 
     pivot["Tasa_Deserción"] = pivot["Deserción"] / pivot["Total"]
-    pivot["Tasa_Graduación"] = (
-        pivot["Graduación"] + pivot["Egreso"]
-    ) / pivot["Total"]
+    pivot["Tasa_Graduación"] = (pivot["Graduación"] + pivot["Egreso"]) / pivot["Total"]
     pivot["Tasa_Retención"] = pivot["Activo"] / pivot["Total"]
 
     tasas_por_semestre = (
@@ -1032,10 +932,6 @@ def generar_datos():
     )
 
     desv_tasas = calcular_desviaciones_tasas(df_ret)
-
-    # ==================================================
-    # 5. Calcular ingresos por ciclo y CAGR
-    # ==================================================
 
     df_ingresos = df_ret[df_ret["EsNuevo"] == 1].copy()
     df_ingresos["Ciclo"] = df_ingresos["SemestreIngreso"] % 100
@@ -1086,13 +982,7 @@ def generar_datos():
 
     desv_cagr_dict = calcular_desviacion_cagr(ingresos_por_ciclo)
 
-    # ==================================================
-    # 6. Crear población base en el último periodo histórico
-    # ==================================================
-
-    ultimo_periodo = ULTIMO_PERIODO
-
-    df_ultimo = df_ret[df_ret["Periodo"] == ultimo_periodo].copy()
+    df_ultimo = df_ret[df_ret["Periodo"] == ULTIMO_PERIODO].copy()
 
     if df_ultimo.empty:
         periodos_disponibles = sorted(df_ret["Periodo"].dropna().unique())
@@ -1139,10 +1029,6 @@ def generar_datos():
 
         Poblacion[carrera] = cohorte
 
-    # ==================================================
-    # 7. Crear ingresos base por carrera y ciclo
-    # ==================================================
-
     df_nuevos = df_ret[df_ret["EsNuevo"] == 1].copy()
     df_nuevos["Ciclo"] = df_nuevos["Periodo"] % 100
 
@@ -1188,12 +1074,7 @@ def generar_datos():
         Ingresos[carrera].setdefault(10, 0)
         Ingresos[carrera].setdefault(20, 0)
 
-    # ==================================================
-    # 8. Crear periodos futuros
-    # ==================================================
-
-    periodo_base = ULTIMO_PERIODO
-    anio_base = periodo_base // 100
+    anio_base = ULTIMO_PERIODO // 100
 
     periodos_futuros = [PRIMER_PERIODO_PROYECCION]
 
@@ -1201,13 +1082,6 @@ def generar_datos():
         anio = anio_base + i
         periodos_futuros.append(anio * 100 + 10)
         periodos_futuros.append(anio * 100 + 20)
-
-    # Ejemplo:
-    # 202620, 202710, 202720, 202810, 202820, ...
-
-    # ==================================================
-    # 9. Ejecutar simulación Monte Carlo
-    # ==================================================
 
     resultados_con_ic = simular_proyecciones_montecarlo(
         Poblacion=Poblacion,
@@ -1220,10 +1094,6 @@ def generar_datos():
         desv_cagr_dict=desv_cagr_dict,
         n_simulaciones=N_SIMULACIONES
     )
-
-    # ==================================================
-    # 10. Suavizar proyección
-    # ==================================================
 
     variables_a_suavizar = [
         "Total_Vivos_Prom",
@@ -1255,10 +1125,6 @@ def generar_datos():
 
     resultados_con_ic = resumen_ic_suav.copy()
 
-    # ==================================================
-    # 11. Construir histórico
-    # ==================================================
-
     periodos_historicos = df_ret[df_ret["Periodo"] >= 201820].copy()
 
     df_hist = periodos_historicos.groupby([
@@ -1284,10 +1150,6 @@ def generar_datos():
         columns={"CarreraHomologada": "Carrera"},
         inplace=True
     )
-
-    # ==================================================
-    # 12. Unir histórico y proyección
-    # ==================================================
 
     resultados_con_ic["Sobrevivientes"] = (
         resultados_con_ic["Total_Vivos"] -
@@ -1319,10 +1181,6 @@ def generar_datos():
         df_completo["Total_Graduados"] +
         df_completo["Total_Vivos"]
     )
-
-    # ==================================================
-    # 13. Crear alertas de caída
-    # ==================================================
 
     periodo_hist_max = (
         df_completo[df_completo["Origen"] == "Histórico"]
@@ -1379,10 +1237,6 @@ def generar_datos():
         alertas_df["Enrollment_Base"] -
         alertas_df["Enrollment_Proyectado"]
     ).apply(lambda x: max(0, round(x)))
-
-    # ==================================================
-    # 14. Calcular ingresos adicionales por ciclo
-    # ==================================================
 
     ciclos_interes = [10, 20]
 
@@ -1488,10 +1342,6 @@ def generar_datos():
         axis=1
     ).round(4)
 
-    # ==================================================
-    # 15. Detectar periodos de caída
-    # ==================================================
-
     df_hist = df_completo[
         df_completo["Origen"] == "Histórico"
     ].copy()
@@ -1567,10 +1417,6 @@ def generar_datos():
         on="Carrera",
         how="left"
     )
-
-    # ==================================================
-    # 16. Calcular score de salud de carrera
-    # ==================================================
 
     df_ret_filtrado = df_ret[df_ret["Periodo"] >= 201820].copy()
 
@@ -1706,7 +1552,6 @@ def generar_datos():
         ~df_indicadores["CarreraHomologada"].isin(excluyentes)
     ].copy()
 
-    # Normalizar indicadores
     scaler = MinMaxScaler()
 
     df_scaled = df_indicadores.copy()
@@ -1754,15 +1599,13 @@ def generar_datos():
 
     df_score = df_scaled.copy()
 
-    # ==================================================
-    # 17. Orden final de columnas y retorno
-    # ==================================================
-
     df_completo = df_completo.reset_index(drop=True)
     alertas_df = alertas_df.reset_index(drop=True)
     df_score = df_score.reset_index(drop=True)
 
     print("Modelo terminado correctamente.")
+    print("Servidor:", SERVIDOR_SQL)
+    print("Base:", BASE_DATOS_SQL)
     print("df_completo:", df_completo.shape)
     print("alertas_df:", alertas_df.shape)
     print("df_score:", df_score.shape)
