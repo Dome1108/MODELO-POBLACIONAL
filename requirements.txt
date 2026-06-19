@@ -5,3 +5,4 @@ sqlalchemy
 pyodbc
 scikit-learn
 plotly
+openpyxl
