@@ -5,6 +5,8 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import unicodedata
+from pathlib import Path
 
 from modelo_poblacional import generar_datos
 
@@ -21,10 +23,48 @@ st.set_page_config(
 
 
 # ======================================================
-# 2. Funciones auxiliares
+# 2. Constantes
 # ======================================================
 
 OPCION_TODAS = "TODAS LAS CARRERAS"
+ARCHIVO_MERCADO = "Crecimiento New Enrollment Porcentajes (1).xlsx"
+
+
+# ======================================================
+# 3. Funciones auxiliares
+# ======================================================
+
+def normalizar_texto(texto):
+    """
+    Normaliza textos para cruzar nombres de carreras aunque tengan tildes,
+    mayúsculas, espacios extra o diferencias menores.
+    """
+    if pd.isna(texto):
+        return ""
+
+    texto = str(texto).upper().strip()
+    texto = unicodedata.normalize("NFKD", texto)
+    texto = "".join([c for c in texto if not unicodedata.combining(c)])
+    texto = " ".join(texto.split())
+
+    return texto
+
+
+def buscar_columna(df, posibles_nombres):
+    """
+    Busca una columna en un DataFrame usando nombres normalizados.
+    """
+    columnas_normalizadas = {
+        normalizar_texto(col): col
+        for col in df.columns
+    }
+
+    for nombre in posibles_nombres:
+        nombre_norm = normalizar_texto(nombre)
+        if nombre_norm in columnas_normalizadas:
+            return columnas_normalizadas[nombre_norm]
+
+    return None
 
 
 def formatear_periodo(periodo):
@@ -83,7 +123,7 @@ def categorizar_score_por_valor(score):
 
 
 # ======================================================
-# 3. Funciones de colores para KPIs
+# 4. Funciones de colores para KPIs
 # ======================================================
 
 def color_tipo_alerta(tipo_alerta):
@@ -91,15 +131,15 @@ def color_tipo_alerta(tipo_alerta):
     Semáforo para tipo de alerta.
     """
     if tipo_alerta == "Caída severa":
-        return "#C62828"  # rojo
+        return "#C62828"
     elif tipo_alerta == "Caída moderada":
-        return "#EF6C00"  # naranja
+        return "#EF6C00"
     elif tipo_alerta == "Caída leve":
-        return "#F9A825"  # amarillo
+        return "#F9A825"
     elif tipo_alerta == "Sin caída":
-        return "#2E7D32"  # verde
+        return "#2E7D32"
     else:
-        return "#616161"  # gris
+        return "#616161"
 
 
 def color_score(categoria_score):
@@ -107,13 +147,13 @@ def color_score(categoria_score):
     Semáforo para score de salud.
     """
     if categoria_score == "Score Bajo":
-        return "#C62828"  # rojo
+        return "#C62828"
     elif categoria_score == "Score Medio":
-        return "#EF6C00"  # naranja
+        return "#EF6C00"
     elif categoria_score == "Score Alto":
-        return "#2E7D32"  # verde
+        return "#2E7D32"
     else:
-        return "#616161"  # gris
+        return "#616161"
 
 
 def color_periodo_caida(periodo):
@@ -125,18 +165,48 @@ def color_periodo_caida(periodo):
     Verde: desde 2041.10 en adelante
     """
     if pd.isna(periodo):
-        return "#2E7D32"  # verde para No aplica
+        return "#2E7D32"
 
     periodo = int(float(periodo))
 
     if periodo <= 203020:
-        return "#C62828"  # rojo
+        return "#C62828"
     elif 203110 <= periodo <= 204020:
-        return "#EF6C00"  # naranja
+        return "#EF6C00"
     elif periodo >= 204110:
-        return "#2E7D32"  # verde
+        return "#2E7D32"
     else:
-        return "#616161"  # gris
+        return "#616161"
+
+
+def color_categoria_mercado(categoria):
+    """
+    Semáforo para categoría de mercado UDLA vs competencia.
+    """
+    categoria_norm = normalizar_texto(categoria)
+
+    if categoria_norm in ["SIN INFORMACION", "SIN INFORMACIÓN", ""]:
+        return "#616161"
+
+    if "UDLA CRECE" in categoria_norm and "MERCADO CAE" in categoria_norm:
+        return "#2E7D32"
+
+    if "UDLA CRECE" in categoria_norm and "MERCADO CRECE" in categoria_norm:
+        return "#1565C0"
+
+    if "UDLA SE MANTIENE" in categoria_norm:
+        return "#F9A825"
+
+    if "LOS DOS CAEN" in categoria_norm:
+        return "#C62828"
+
+    if "UDLA CAE" in categoria_norm and "MERCADO CRECE" in categoria_norm:
+        return "#C62828"
+
+    if "UDLA CAE" in categoria_norm:
+        return "#EF6C00"
+
+    return "#616161"
 
 
 def tarjeta_kpi(titulo, valor, color="#262730", subtitulo=None):
@@ -176,10 +246,11 @@ def tarjeta_kpi(titulo, valor, color="#262730", subtitulo=None):
                 {titulo}
             </div>
             <div style="
-                font-size: 2.3rem;
+                font-size: 2.1rem;
                 color: {color};
                 font-weight: 700;
                 line-height: 1.1;
+                overflow-wrap: anywhere;
             ">
                 {valor}
             </div>
@@ -191,7 +262,7 @@ def tarjeta_kpi(titulo, valor, color="#262730", subtitulo=None):
 
 
 # ======================================================
-# 4. Cargar datos desde el modelo
+# 5. Cargar datos
 # ======================================================
 
 @st.cache_data(show_spinner="Generando datos del modelo poblacional...")
@@ -200,16 +271,65 @@ def cargar_datos():
     return df_completo, alertas_df, df_score
 
 
+@st.cache_data(show_spinner="Cargando información de mercado...")
+def cargar_datos_mercado():
+    """
+    Carga el Excel de mercado que está en la raíz del proyecto.
+    Debe contener una columna de carrera y una columna llamada Categoria/Categoría.
+    """
+    ruta_base = Path(__file__).resolve().parent
+    ruta_excel = ruta_base / ARCHIVO_MERCADO
+
+    if not ruta_excel.exists():
+        posibles = list(ruta_base.glob("*Crecimiento*Enrollment*.xlsx"))
+        if posibles:
+            ruta_excel = posibles[0]
+        else:
+            return pd.DataFrame(columns=["Carrera", "Categoria_Mercado", "Carrera_Key"])
+
+    df_mercado = pd.read_excel(ruta_excel)
+
+    col_carrera = buscar_columna(
+        df_mercado,
+        ["carrera", "Carrera", "CarreraHomologada", "Carrera Homologada"]
+    )
+
+    col_categoria = buscar_columna(
+        df_mercado,
+        ["categoria", "categoría", "Categoria", "Categoría"]
+    )
+
+    if col_carrera is None or col_categoria is None:
+        return pd.DataFrame(columns=["Carrera", "Categoria_Mercado", "Carrera_Key"])
+
+    df_mercado = df_mercado[[col_carrera, col_categoria]].copy()
+
+    df_mercado = df_mercado.rename(columns={
+        col_carrera: "Carrera",
+        col_categoria: "Categoria_Mercado"
+    })
+
+    df_mercado["Carrera"] = df_mercado["Carrera"].astype(str)
+    df_mercado["Categoria_Mercado"] = df_mercado["Categoria_Mercado"].astype(str)
+    df_mercado["Carrera_Key"] = df_mercado["Carrera"].apply(normalizar_texto)
+
+    df_mercado = df_mercado.drop_duplicates(subset=["Carrera_Key"])
+
+    return df_mercado
+
+
 df_completo, alertas_df, df_score = cargar_datos()
+df_mercado = cargar_datos_mercado()
 
 
 # ======================================================
-# 5. Preparar columnas
+# 6. Preparar columnas
 # ======================================================
 
 df_completo = df_completo.copy()
 alertas_df = alertas_df.copy()
 df_score = df_score.copy()
+df_mercado = df_mercado.copy()
 
 df_completo["Periodo"] = pd.to_numeric(df_completo["Periodo"], errors="coerce")
 df_completo = df_completo.dropna(subset=["Periodo"]).copy()
@@ -217,23 +337,25 @@ df_completo["Periodo"] = df_completo["Periodo"].astype(int)
 
 df_completo["Periodo_Label"] = df_completo["Periodo"].apply(formatear_periodo)
 df_completo["Carrera"] = df_completo["Carrera"].astype(str)
+df_completo["Carrera_Key"] = df_completo["Carrera"].apply(normalizar_texto)
 
-# Eje ordenado para que todos los semestres tengan la misma distancia visual.
 periodos_globales = sorted(df_completo["Periodo"].dropna().astype(int).unique())
 periodo_a_orden = {periodo: i for i, periodo in enumerate(periodos_globales)}
 
 df_completo["Periodo_Orden"] = df_completo["Periodo"].map(periodo_a_orden)
 
 alertas_df["Carrera"] = alertas_df["Carrera"].astype(str)
+alertas_df["Carrera_Key"] = alertas_df["Carrera"].apply(normalizar_texto)
 
 if "CarreraHomologada" in df_score.columns:
     df_score = df_score.rename(columns={"CarreraHomologada": "Carrera"})
 
 df_score["Carrera"] = df_score["Carrera"].astype(str)
+df_score["Carrera_Key"] = df_score["Carrera"].apply(normalizar_texto)
 
 
 # ======================================================
-# 6. Título principal
+# 7. Título principal
 # ======================================================
 
 st.title("📊 Dashboard de Proyección Poblacional de Carreras")
@@ -241,13 +363,14 @@ st.title("📊 Dashboard de Proyección Poblacional de Carreras")
 st.markdown(
     """
     Este dashboard muestra el histórico y la proyección futura de enrollment, 
-    nuevos ingresos, desertores, graduados, alertas de caída y score de salud por carrera.
+    nuevos ingresos, desertores, graduados, alertas de caída, score de salud 
+    y categoría de mercado frente a la competencia.
     """
 )
 
 
 # ======================================================
-# 7. Sidebar de filtros
+# 8. Sidebar de filtros
 # ======================================================
 
 st.sidebar.header("Filtros")
@@ -280,7 +403,7 @@ rango_periodos = st.sidebar.select_slider(
 
 
 # ======================================================
-# 8. Filtrar información
+# 9. Filtrar información
 # ======================================================
 
 df_base_filtrada = df_completo[
@@ -333,7 +456,7 @@ df_filtrado = df_filtrado.sort_values("Periodo")
 
 
 # ======================================================
-# 9. KPIs superiores
+# 10. KPIs superiores
 # ======================================================
 
 titulo_vista = (
@@ -396,6 +519,21 @@ if es_general:
         score_salud = None
         categoria_score = "Sin score"
 
+    if not df_mercado.empty and "Categoria_Mercado" in df_mercado.columns:
+        categoria_mercado = (
+            df_mercado["Categoria_Mercado"]
+            .dropna()
+            .astype(str)
+            .value_counts()
+        )
+
+        if not categoria_mercado.empty:
+            categoria_mercado = categoria_mercado.idxmax()
+        else:
+            categoria_mercado = "Sin información"
+    else:
+        categoria_mercado = "Sin información"
+
 else:
     if not alerta_carrera.empty:
         tipo_alerta = alerta_carrera["Tipo_Alerta"].iloc[0]
@@ -445,11 +583,27 @@ else:
         score_salud = None
         categoria_score = "Sin score"
 
+    carrera_key_actual = normalizar_texto(carrera_seleccionada)
+
+    mercado_carrera = df_mercado[
+        df_mercado["Carrera_Key"] == carrera_key_actual
+    ]
+
+    if not mercado_carrera.empty:
+        categoria_mercado = mercado_carrera["Categoria_Mercado"].iloc[0]
+    else:
+        categoria_mercado = "Sin información"
+
 
 color_alerta = color_tipo_alerta(tipo_alerta)
 color_score_salud = color_score(categoria_score)
 color_caida_75 = color_periodo_caida(periodo_caida_75_raw)
+color_mercado = color_categoria_mercado(categoria_mercado)
 
+
+# ======================================================
+# 11. Tarjetas KPI
+# ======================================================
 
 kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
 
@@ -497,11 +651,7 @@ with kpi5:
         )
 
 
-# ======================================================
-# 10. Segunda fila de KPIs
-# ======================================================
-
-kpi6, kpi7, kpi8 = st.columns(3)
+kpi6, kpi7, kpi8, kpi9 = st.columns(4)
 
 with kpi6:
     tarjeta_kpi(
@@ -524,9 +674,17 @@ with kpi8:
         color=color_caida_75
     )
 
+with kpi9:
+    tarjeta_kpi(
+        titulo="Categoría de mercado",
+        valor=categoria_mercado,
+        color=color_mercado,
+        subtitulo="UDLA vs competencia"
+    )
+
 
 # ======================================================
-# 11. Gráfico principal: histórico y proyección
+# 12. Gráfico principal: histórico y proyección
 # ======================================================
 
 st.subheader("Histórico y proyección por carrera")
@@ -580,7 +738,6 @@ fig_principal = px.line(
     title=f"Evolución histórica y proyectada - {titulo_vista}"
 )
 
-# Línea vertical en el primer periodo proyectado: 2026.20
 if 202620 in periodo_a_orden:
     orden_202620 = periodo_a_orden[202620]
 
@@ -636,7 +793,7 @@ st.plotly_chart(fig_principal, use_container_width=True)
 
 
 # ======================================================
-# 12. Gráfico de enrollment total
+# 13. Gráficos secundarios
 # ======================================================
 
 col_g1, col_g2 = st.columns(2)
@@ -688,10 +845,6 @@ with col_g1:
 
     st.plotly_chart(fig_enrollment, use_container_width=True)
 
-
-# ======================================================
-# 13. Gráfico de composición: nuevos, desertores y graduados
-# ======================================================
 
 with col_g2:
     st.subheader("Composición por periodo")
@@ -847,6 +1000,12 @@ with st.expander("Ver alertas"):
 with st.expander("Ver score"):
     st.dataframe(
         score_carrera,
+        use_container_width=True
+    )
+
+with st.expander("Ver datos de mercado"):
+    st.dataframe(
+        df_mercado,
         use_container_width=True
     )
 
